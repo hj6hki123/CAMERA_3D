@@ -404,7 +404,7 @@ def parse():
     p.add_argument("--lr1", type=float, default=2e-4)
     p.add_argument("--ep1", type=int, default=8)
     p.add_argument("--L", type=int, default=100, help="# reranker候選數")
-    p.add_argument("--lr2", type=float, default=3e-4)
+    p.add_argument("--lr2", type=float, default=1e-4)
     p.add_argument("--ep2", type=int, default=5)
     p.add_argument("--wandb", action="store_true", help="啟用 wandb 紀錄")
     p.add_argument("--resume_enc1", type=str, default=None,
