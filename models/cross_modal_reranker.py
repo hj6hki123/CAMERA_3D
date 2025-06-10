@@ -92,7 +92,7 @@ class CrossModalReranker(nn.Module):
             dropout=0.1,
         )
         self.blocks = nn.ModuleList([encoder_layer for _ in range(num_layers)])
-
+        
         # 6. 最後取 CLS token 後做線性打分
         self.scorer = nn.Sequential(
             nn.LayerNorm(txt_dim),
