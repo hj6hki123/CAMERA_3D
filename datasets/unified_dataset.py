@@ -31,7 +31,7 @@ from collections import defaultdict
 class UnifiedDataset(Dataset):
     def __init__(self,
                  jsonl_path: str,
-                 view_dir: str = "/home/klooom/cheng/3d_retrival/objaverse-rendering/views",
+                 view_dir: str = "C:\\Users\\klooom\\Desktop\\code\\CAMERA_3D\\datasets\\views",
                  image_size: int = 224,
                  num_views: int = 12):
         super().__init__()

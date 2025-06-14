@@ -163,34 +163,34 @@ def stage1(args, ds):
 
             pbar.set_postfix(loss=f"{loss.item():.4f}")
             wb_log({"stage1/loss": loss.item()}, step=ep * len(dl) + step)
-            # 每 1000 steps 紀錄一次 SimHeatmap
-            if _USE_WANDB and (step % 1000 == 0):
-                log_sim_heatmap(v_vec.detach(), t_vec.detach(), step=ep * len(dl) + step)
+            # # 每 1000 steps 紀錄一次 SimHeatmap
+            # if _USE_WANDB and (step % 1000 == 0):
+            #     log_sim_heatmap(v_vec.detach(), t_vec.detach(), step=ep * len(dl) + step)
 
-                # 3.a 紀錄 FusionBlock 第一層第一個 head 的 attention
-                # fusion_attn_maps[0] shape=(B, heads, T, T)
-                # 取 batch=0, head=0 的那張 (T×T) heatmap
-                fa = fusion_attn_maps[0][0].detach().cpu().numpy()  # (T, T)
-                fig, ax = plt.subplots(figsize=(4,4))
-                im = ax.imshow(fa, vmin=0, vmax=1, cmap="viridis")
-                ax.set_title(f"Fusion Attn L0 H0 @ step {step}")
-                fig.colorbar(im, fraction=0.04, pad=0.03)
-                buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png")
-                plt.close(fig); buf.seek(0)
-                wandb.log({f"stage1/fusion_attn": wandb.Image(Image.open(buf))},
-                          step=ep * len(dl) + step)
+            #     # 3.a 紀錄 FusionBlock 第一層第一個 head 的 attention
+            #     # fusion_attn_maps[0] shape=(B, heads, T, T)
+            #     # 取 batch=0, head=0 的那張 (T×T) heatmap
+            #     fa = fusion_attn_maps[0][0].detach().cpu().numpy()  # (T, T)
+            #     fig, ax = plt.subplots(figsize=(4,4))
+            #     im = ax.imshow(fa, vmin=0, vmax=1, cmap="viridis")
+            #     ax.set_title(f"Fusion Attn L0 H0 @ step {step}")
+            #     fig.colorbar(im, fraction=0.04, pad=0.03)
+            #     buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png")
+            #     plt.close(fig); buf.seek(0)
+            #     wandb.log({f"stage1/fusion_attn": wandb.Image(Image.open(buf))},
+            #               step=ep * len(dl) + step)
 
-                # 3.b 紀錄 GateFusion 第一層第一個 head 的 attention
-                # vis_attn_maps[0] shape=(B, heads, T, T)
-                va = vis_attn_maps[0][0].detach().cpu().numpy()  # (T, T)
-                fig, ax = plt.subplots(figsize=(4,4))
-                im = ax.imshow(va, vmin=0, vmax=1, cmap="viridis")
-                ax.set_title(f"GateFusion Attn L0 H0 @ step {step}")
-                fig.colorbar(im, fraction=0.04, pad=0.03)
-                buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png")
-                plt.close(fig); buf.seek(0)
-                wandb.log({f"stage1/vis_attn": wandb.Image(Image.open(buf))},
-                          step=ep * len(dl) + step)
+            #     # 3.b 紀錄 GateFusion 第一層第一個 head 的 attention
+            #     # vis_attn_maps[0] shape=(B, heads, T, T)
+            #     va = vis_attn_maps[0][0].detach().cpu().numpy()  # (T, T)
+            #     fig, ax = plt.subplots(figsize=(4,4))
+            #     im = ax.imshow(va, vmin=0, vmax=1, cmap="viridis")
+            #     ax.set_title(f"GateFusion Attn L0 H0 @ step {step}")
+            #     fig.colorbar(im, fraction=0.04, pad=0.03)
+            #     buf = io.BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png")
+            #     plt.close(fig); buf.seek(0)
+            #     wandb.log({f"stage1/vis_attn": wandb.Image(Image.open(buf))},
+            #               step=ep * len(dl) + step)
 
         # 每個 epoch 結束 存一次 encoder weights
         os.makedirs(args.out, exist_ok=True)
@@ -337,28 +337,28 @@ def stage2(args, ds, txt_enc, vis_enc, index, all_tok):
             wb_log({"stage2/loss": loss.item()},
                    step=(args.ep1 + ep) * len(loader) + step)
 
-            # 2) 每隔 1000 steps log 一張「相似度矩陣 heatmap」
-            if _USE_WANDB and (step % 1000 == 0):
-                # 重新 forward 一筆（batch[0]）去拿 global v_vec
-                with torch.no_grad():
-                    t_v, _, _, _ = txt_enc([caps[0]], [obj_ids[0]])
-                    v_v, _, _ = vis_enc(imgs[0:1].cuda(), t_v)
-                    v_norm = F.normalize(v_v, 2, 1)[:16]
-                    t_norm = F.normalize(t_v, 2, 1)[:16]
-                    sim2 = (v_norm @ t_norm.T).cpu().numpy()  # (<=16, <=16)
+            # # 2) 每隔 1000 steps log 一張「相似度矩陣 heatmap」
+            # if _USE_WANDB and (step % 1000 == 0):
+            #     # 重新 forward 一筆（batch[0]）去拿 global v_vec
+            #     with torch.no_grad():
+            #         t_v, _, _, _ = txt_enc([caps[0]], [obj_ids[0]])
+            #         v_v, _, _ = vis_enc(imgs[0:1].cuda(), t_v)
+            #         v_norm = F.normalize(v_v, 2, 1)[:16]
+            #         t_norm = F.normalize(t_v, 2, 1)[:16]
+            #         sim2 = (v_norm @ t_norm.T).cpu().numpy()  # (<=16, <=16)
 
-                fig, ax = plt.subplots(figsize=(4,4))
-                im = ax.imshow(sim2, vmin=-1, vmax=1, cmap="viridis")
-                ax.set_title(f"stage2 sim @ ep{ep} step{step}")
-                fig.colorbar(im, fraction=0.04, pad=0.03)
-                buf = io.BytesIO()
-                fig.tight_layout()
-                fig.savefig(buf, format="png")
-                plt.close(fig)
-                buf.seek(0)
-                wandb.log({f"stage2/sim_matrix":
-                       wandb.Image(Image.open(buf))},
-                       step=(args.ep1 + ep) * len(loader) + step)
+            #     fig, ax = plt.subplots(figsize=(4,4))
+            #     im = ax.imshow(sim2, vmin=-1, vmax=1, cmap="viridis")
+            #     ax.set_title(f"stage2 sim @ ep{ep} step{step}")
+            #     fig.colorbar(im, fraction=0.04, pad=0.03)
+            #     buf = io.BytesIO()
+            #     fig.tight_layout()
+            #     fig.savefig(buf, format="png")
+            #     plt.close(fig)
+            #     buf.seek(0)
+            #     wandb.log({f"stage2/sim_matrix":
+            #            wandb.Image(Image.open(buf))},
+            #            step=(args.ep1 + ep) * len(loader) + step)
 
             # # 3) 每隔 2000 steps log 一組「Retrieval 範例 Carousel」
             # if _USE_WANDB and (step % 2000 == 0):
