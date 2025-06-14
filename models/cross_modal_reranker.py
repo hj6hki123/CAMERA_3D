@@ -66,7 +66,7 @@ class CrossModalReranker(nn.Module):
         super().__init__()
 
         # 1. CLS token（Learnable）
-        #    用來表示整段跨模態序列的全域向量，最後取 CLS 做分數
+        #    用來表示整段跨模態序列的全域向量,最後取 CLS 做分數
         self.cls_token = nn.Parameter(torch.randn(1, 1, txt_dim))  # (1, 1, txt_dim)
 
         # 2. 視覺 token 映射：Linear(vis_dim → txt_dim) + LayerNorm
@@ -75,7 +75,7 @@ class CrossModalReranker(nn.Module):
             nn.LayerNorm(txt_dim)
         )
 
-        # 3. 類別 (Type Embedding)：0 表示文字，1 表示視覺
+        # 3. 類別 (Type Embedding)：0 表示文字,1 表示視覺
         #    一共兩個類別 embedding
         self.type_embeddings = nn.Embedding(2, txt_dim)  # (num_types=2, txt_dim)
 
@@ -112,8 +112,8 @@ class CrossModalReranker(nn.Module):
         """
         txt_tok:   (B, Tt, txt_dim)     - 已經是文字 token embedding
         vis_tok:   (B, Tv, vis_dim)     - 原始視覺 token embedding
-        txt_padding_mask: (B, Tt)       - True 代表 PAD，不計算注意力 (optional)
-        vis_padding_mask: (B, Tv)       - True 代表 PAD，不計算注意力 (optional)
+        txt_padding_mask: (B, Tt)       - True 代表 PAD,不計算注意力 (optional)
+        vis_padding_mask: (B, Tv)       - True 代表 PAD,不計算注意力 (optional)
 
         回傳：score (B,)
         """
@@ -126,9 +126,6 @@ class CrossModalReranker(nn.Module):
         cls_tokens_expand = self.cls_token.expand(B, -1, -1)
 
         # 2. 處理文字 token
-        #    先假設上層傳進來的 txt_tok 已經是 (B, Tt, txt_dim)，裡面含有 pos encoding 嗎？
-        #    為了安全，我們重新把位置編碼 + 類別編碼都加進來。
-        #    類別 embedding: 文字類別 idx = 0
         text_type_ids = torch.zeros(B, Tt, dtype=torch.long, device=txt_tok.device)  # (B, Tt)
         text_type_emb = self.type_embeddings(text_type_ids)                         # (B, Tt, txt_dim)
 
@@ -150,11 +147,11 @@ class CrossModalReranker(nn.Module):
         seq = self.pos_encoding(seq)  # (B, 1+Tt+Tv, txt_dim)
 
         # 7. 構造 attention mask / key_padding_mask
-        #    TransformerEncoderLayer() 中的 src_key_padding_mask 形狀是 (B, S)，
+        #    TransformerEncoderLayer() 中的 src_key_padding_mask 形狀是 (B, S),
         #    其中 True 表示對應位置應該被遮罩（不計算注意力）。
         #
         #    需要把 (B, Tt) 和 (B, Tv) 先組成 (B, 1+Tt+Tv)：
-        #    - CLS token 一定要看見所有 token，所以對應位置填 False（不遮罩）
+        #    - CLS token 一定要看見所有 token,所以對應位置填 False（不遮罩）
         #    - 文字 token 直接複製 txt_padding_mask
         #    - 視覺 token 直接複製 vis_padding_mask
         if txt_padding_mask is None:
