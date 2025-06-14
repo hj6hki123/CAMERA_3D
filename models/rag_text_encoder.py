@@ -1,4 +1,3 @@
-# models/rag_text_encoder.py
 import json, torch, torch.nn as nn
 from transformers import AutoTokenizer, AutoModel
 from models.dense_retriever import DenseRetriever
@@ -21,7 +20,7 @@ class FusionBlock(nn.Module):
         return x, attn_weights  # attn_weights shape = (B, heads, T, T)
 
 class CrossFusion(nn.Module):
-    def __init__(self, L=2, d=768, h=8):
+    def __init__(self, L=3, d=768, h=8):
         super().__init__()
         self.blocks = nn.ModuleList([FusionBlock(d, h) for _ in range(L)])
         self.proj   = nn.Linear(d, 512)
@@ -35,7 +34,7 @@ class CrossFusion(nn.Module):
         return cls_vec, all_attn_maps
 
 class RAGTextEncoder(nn.Module):
-    def __init__(self, unified_jsonl, top_k=4):
+    def __init__(self, unified_jsonl, top_k=6, device="cuda", cache_dir: str = None):
         super().__init__()
         self.top_k = top_k
 
@@ -46,14 +45,21 @@ class RAGTextEncoder(nn.Module):
             oid  = item["obj_id"]
             for t in item.get("corpus_texts", []):
                 corpus.append({"text": t, "obj_id": oid})
-        temp_path = Path(unified_jsonl).with_name("temp_corpus.jsonl")
+                
+        if cache_dir:
+            base = Path(cache_dir)
+        else:
+            base = Path(unified_jsonl).parent
+        base.mkdir(parents=True, exist_ok=True)
+        temp_path = base / "temp_corpus.jsonl"
+        
         if not temp_path.exists():
             with open(temp_path, "w") as f:
                 for c in corpus:
                     f.write(json.dumps(c) + "\n")
 
-        # DenseRetriever
-        self.retriever = DenseRetriever(str(temp_path), device="cuda", batch=24)
+        # DenseRetriever - 使用傳入的設備參數
+        self.retriever = DenseRetriever(str(temp_path), device=device, batch=24)
         self.fusion    = CrossFusion()
 
     def forward(self, q_list, obj_ids=None, return_loss=False):

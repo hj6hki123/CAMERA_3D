@@ -1,0 +1,38 @@
+=== CrossModalReranker 結構 (設備: cuda) ===
+CrossModalReranker(
+  (map_vis): Sequential(
+    (0): Linear(in_features=512, out_features=768, bias=True)
+    (1): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+  )
+  (type_embeddings): Embedding(2, 768)
+  (pos_encoding): PositionalEncoding()
+  (blocks): ModuleList(
+    (0-1): 2 x TransformerEncoderLayer(
+      (self_attn): MultiheadAttention(
+        (out_proj): NonDynamicallyQuantizableLinear(in_features=768, out_features=768, bias=True)
+      )
+      (linear1): Linear(in_features=768, out_features=3072, bias=True)
+      (dropout): Dropout(p=0.1, inplace=False)
+      (linear2): Linear(in_features=3072, out_features=768, bias=True)
+      (norm1): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+      (norm2): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+      (dropout1): Dropout(p=0.1, inplace=False)
+      (dropout2): Dropout(p=0.1, inplace=False)
+    )
+  )
+  (scorer): Sequential(
+    (0): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+    (1): Dropout(p=0.1, inplace=False)
+    (2): Linear(in_features=768, out_features=1, bias=True)
+  )
+)
+
+=== CrossModalReranker 參數統計 ===
+總參數數量: 7,488,001
+可訓練參數: 7,488,001
+
+=== 測試 forward ===
+文字輸入 shape: torch.Size([1, 10, 768])
+視覺輸入 shape: torch.Size([1, 12, 512])
+輸出分數 shape: torch.Size([1])
+分數值: -0.5373
