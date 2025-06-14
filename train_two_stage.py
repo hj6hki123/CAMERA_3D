@@ -526,7 +526,7 @@ if __name__ == "__main__":
         vis_enc.load_state_dict(state["vis"])
         txt_enc.eval(); vis_enc.eval()
     else:
-        txt_enc, vis_enc = stage1_four_phases(args, ds, device)
+        txt_enc, vis_enc = stage1(args, ds, device)
 
     index, all_tok = build_faiss_with_tok(ds, txt_enc, vis_enc, args, device)
     stage2(args, ds, txt_enc, vis_enc, index, all_tok, device)

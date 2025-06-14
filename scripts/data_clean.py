@@ -97,45 +97,90 @@ def greedy_attribute_filter(sents: list[str],
             kept.append(idx)
     return kept
 
-# ───── 7. 主流程 ─────
+
+# ───── 7. 主流程─────
 def build_selected(inp: str,
                    out: str,
                    thresh_sim: float = 0.85,
-                   max_keep: int = 10) -> None:
+                   max_keep: int = 10,
+                   thresh_topic: float = 0.5) -> None: # <-- 新增 thresh_topic 參數
+    """
+    主流程：讀取、清洗、篩選並寫入新的 JSONL 檔案。
+    新增了 thresh_topic 參數來控制主題一致性過濾的嚴格程度。
+    """
     with open(inp, encoding="utf-8") as fin,\
          open(out, "w", encoding="utf-8") as fout:
 
-        for line in fin:
+        # 使用 tqdm 來顯示進度
+        from tqdm import tqdm
+        num_lines = sum(1 for line in open(inp, encoding="utf-8"))
+        fin.seek(0)
+
+        for line in tqdm(fin, total=num_lines, desc="Processing records"):
             rec = json.loads(line)
             oid = rec["obj_id"]
             caps: list[str] = rec.get("queries", [])
-            # 收集句子
+            
             sents: list[str] = []
             for cap in caps:
                 sents.extend(split_and_clean(cap))
+            
+            # 先對所有句子做一次基礎去重
+            sents = sorted(list(set(sents)), key=sents.index)
+            
             if not sents:
                 continue
 
             # 向量化
             vecs = MODEL.encode(sents, normalize_embeddings=True)
-            # 中心句
+            
+            # 選出代表性 query
             centroid = normalize(vecs.mean(0, keepdims=True))[0]
             rep_idx  = int(np.argmax(vecs @ centroid))
-            # greedy 挑句
-            rem_idx  = [i for i in range(len(sents)) if i != rep_idx]
-            keep_idx = greedy_attribute_filter([sents[i] for i in rem_idx],
-                                               vecs[rem_idx],
-                                               thresh_sim, max_keep)
+            query_sent = sents[rep_idx]
+            query_vec = vecs[rep_idx]
 
+            # ==========================================================
+            # ==                  核心修改：主題一致性過濾              ==
+            # ==========================================================
+            
+            # 1. 計算所有候選句子與代表性 query 的語意相似度
+            all_sims = vecs @ query_vec.T
+
+            # 2. 篩選出主題相關的句子 (相似度需大於門檻，且不能是 query 自己)
+            on_topic_indices = []
+            for i in range(len(sents)):
+                if i != rep_idx and all_sims[i] > thresh_topic:
+                    on_topic_indices.append(i)
+
+            # 3. 如果沒有任何主題相關的句子，corpus_texts 為空
+            if not on_topic_indices:
+                keep_idx = []
+            else:
+                # 4. 只從「主題相關」的句子中，再用 greedy-attribute 策略篩選
+                on_topic_sents = [sents[i] for i in on_topic_indices]
+                on_topic_vecs = vecs[on_topic_indices]
+                
+                # greedy_attribute_filter 返回的是 on_topic_sents 這個子列表中的索引
+                kept_indices_in_subset = greedy_attribute_filter(
+                    on_topic_sents,
+                    on_topic_vecs,
+                    thresh_sim,
+                    max_keep
+                )
+                # 將子列表的索引映射回原始 sents 列表中的全域索引
+                keep_idx = [on_topic_indices[i] for i in kept_indices_in_subset]
+            
+            # ==========================================================
+            
             out_rec = {
                 "obj_id":      oid,
-                "query":       sents[rep_idx],
-                "corpus_texts":[sents[rem_idx[i]] for i in keep_idx]
+                "query":       query_sent,
+                "corpus_texts": [sents[i] for i in keep_idx]
             }
             fout.write(json.dumps(out_rec, ensure_ascii=False) + "\n")
 
-    print(f"✓ 已完成屬性化清洗 → {out}")
-
+    print(f"已完成屬性化清洗 → {out}")
 # ───── 8. CLI 介面 ─────
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
