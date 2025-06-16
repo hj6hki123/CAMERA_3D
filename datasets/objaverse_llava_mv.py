@@ -1,5 +1,5 @@
 """
-依你 jsonl & 圖片路徑 (*.png) 實作,多視角 → Tensor(V,C,H,W)
+依 jsonl & 圖片路徑 (*.png) 實作,多視角 → Tensor(V,C,H,W)
 """
 import json, os, random
 from collections import defaultdict

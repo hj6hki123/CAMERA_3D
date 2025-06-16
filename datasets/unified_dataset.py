@@ -1,3 +1,70 @@
+# models/datasets/unified_dataset.py
+
+# import os
+# import json
+# import glob
+# import torch
+# from torch.utils.data import Dataset
+# from torchvision import transforms
+# from PIL import Image
+# from collections import defaultdict
+
+# class UnifiedDataset(Dataset):
+#     def __init__(self,
+#                  jsonl_path: str,
+#                  view_dir: str = "C:\\Users\\klooom\\Desktop\\code\\CAMERA_3D\\datasets\\views",
+#                  image_size: int = 224,
+#                  num_views: int = 12):
+#         super().__init__()
+
+#         # 直接讀取包含 external_contexts 的增強資料集
+#         with open(jsonl_path, encoding="utf-8") as f:
+#             self.items = [json.loads(line) for line in f if line.strip()]
+        
+#         # 篩選掉可能沒有 external_contexts 的項目，確保資料完整性
+#         self.items = [item for item in self.items if "external_contexts" in item and item["query"]]
+        
+#         self.obj2idx = defaultdict(list)
+#         for i, it in enumerate(self.items):
+#             self.obj2idx[it["obj_id"]].append(i)
+
+#         self.base_view_dir = view_dir
+#         self.num_views     = num_views
+#         self.tr = transforms.Compose([
+#             transforms.Resize((image_size, image_size)),
+#             transforms.ToTensor()
+#         ])
+
+#     def __len__(self):
+#         return len(self.items)
+
+#     def __getitem__(self, idx):
+#         rec    = self.items[idx]
+#         obj_id = rec["obj_id"]
+#         query  = rec["query"]
+#         external_contexts = rec["external_contexts"]
+
+#         view_folder = os.path.join(self.base_view_dir, obj_id)
+#         pngs = sorted(glob.glob(os.path.join(view_folder, "*.png")))
+        
+#         if not pngs:
+#             raise RuntimeError(f"Object ID {obj_id} has no images in {view_folder}")
+
+#         selected = pngs[:self.num_views]
+#         imgs = [self.tr(Image.open(p).convert("RGB")) for p in selected]
+        
+#         # 如果圖片數量不足，複製最後一張以補齊
+#         while len(imgs) < self.num_views:
+#             imgs.append(imgs[-1].clone())
+            
+#         imgs = torch.stack(imgs, dim=0)
+
+#         # 返回元組 (tuple)，以避免後續在 DataLoader 中出現問題
+#         return query, imgs.float(), obj_id, idx, tuple(external_contexts)
+
+
+
+
 # -*- coding: utf-8 -*-
 import os
 import json

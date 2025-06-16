@@ -23,16 +23,18 @@ class Block(nn.Module):
         self.ln2 = nn.LayerNorm(d)
         self.attn = nn.MultiheadAttention(d, h, dropout=p, batch_first=True)
         self.ff   = nn.Sequential(
-            nn.Linear(d, d*4), nn.GELU(),
-            nn.Dropout(p), nn.Linear(d*4, d)
+            nn.Linear(d, d*4), nn.GELU(), nn.Dropout(p), nn.Linear(d*4, d)
         )
 
     def forward(self, x):
-        # 自注意力
-        attn_out, attn_w = self.attn(self.ln1(x), self.ln1(x), self.ln1(x), need_weights=True)
+        attn_out, attn_w = self.attn(
+            self.ln1(x), self.ln1(x), self.ln1(x),
+            need_weights=True,
+            average_attn_weights=False   # ← 放在 forward
+        )
         x = x + attn_out
         x = x + self.ff(self.ln2(x))
-        return x, attn_w
+        return x, attn_w       # attn_w: (B, heads, T, T)
 
 class GFMVEncoder(nn.Module):
     def __init__(self,
@@ -74,6 +76,8 @@ class GFMVEncoder(nn.Module):
         # 池化與輸出投影
         self.pool      = nn.AdaptiveMaxPool1d(1)
         self.out_proj  = nn.Linear(dim, dim)
+
+        self.log_temp = nn.Parameter(torch.zeros(1))
 
     def forward(self, imgs, txt_vec=None):
         """
@@ -121,6 +125,17 @@ class GFMVEncoder(nn.Module):
         fuse_attn_maps = []
         for blk in self.fusion_blocks:
             fuse_seq, attn_w = blk(fuse_seq)
+
+            if blk is self.fusion_blocks[-1]:
+                a = F.softplus(self.log_temp)              # scalar ≥ 0
+                # 取 Gate 查 View 的 logits  ≈ log(p) * α
+                gate_logits = torch.log(attn_w[:, :, 1, 2:2+self.V] + 1e-6) * a
+                gate_soft   = torch.softmax(gate_logits, dim=-1)
+                # 塞回 attn_w，保持其它 token 不變
+                attn_w      = attn_w.clone()               # 避免 in-place 對 autograd 出錯
+                attn_w[:, :, 1, 2:2+self.V] = gate_soft
+
+
             fuse_attn_maps.append(attn_w)                            # (B, heads, T_fuse, T_fuse)
 
         # ────── 全域向量與輸出 ──────

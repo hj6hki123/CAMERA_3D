@@ -62,5 +62,5 @@ def process_dataset(root_dir, out_json="objaverse_captions.jsonl"):
 
 # ---------- 4) 執行 ----------
 if __name__ == "__main__":
-    DATA_ROOT = "/home/klooom/cheng/3d_retrival/objaverse-rendering/views"  # 替換成你的資料夾
+    DATA_ROOT = "/home/klooom/cheng/3d_retrival/objaverse-rendering/views"  # 替換成的資料夾
     process_dataset(DATA_ROOT, "objaverse_mv_llava_captions.jsonl")

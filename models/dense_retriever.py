@@ -8,7 +8,7 @@ DenseRetriever:DPR 風格可微檢索器
 import json, os, torch, torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModel
 from tqdm import tqdm
-
+from adapters import BertAdapterModel
 
 class DenseRetriever(torch.nn.Module):
     def __init__(self,
@@ -22,7 +22,13 @@ class DenseRetriever(torch.nn.Module):
 
         # ------- BERT encoder & tokenizer -----------------------------------
         self.tok  = AutoTokenizer.from_pretrained("bert-base-uncased")
-        self.qenc = AutoModel.from_pretrained("bert-base-uncased").to(self.device)
+        # ------- query encoder ︱加一顆可訓練 Adapter -------
+        self.qenc = BertAdapterModel.from_pretrained("bert-base-uncased").to(self.device)
+        try:
+            self.qenc.add_adapter("retr_adapter")         # 只加一次；若已存在會丟 ValueError
+        except ValueError:
+            pass
+        self.qenc.train_adapter("retr_adapter")           # 冰住 backbone，只放行 adapter
         self.kenc = AutoModel.from_pretrained("bert-base-uncased").to(self.device)
 
         # ------- 讀取 corpus -------------------------------------------------
@@ -59,10 +65,19 @@ class DenseRetriever(torch.nn.Module):
     # --------------------------------------------------------------------- #
     #                          推論期  API                                   #
     # --------------------------------------------------------------------- #
-    def query_encode(self, q_list):                          # (B,768)
+    def query_encode(self, q_list):                # (B,768)
         enc = self.tok(q_list, return_tensors="pt",
-                       padding=True, truncation=True).to(self.qenc.device)
-        return self.qenc(**enc).last_hidden_state[:, 0]
+                    padding=True, truncation=True).to(self.qenc.device)
+
+        prev = self.qenc.active_adapters
+        self.qenc.set_active_adapters("retr_adapter")
+
+        #  只跑 backbone
+        out = self.qenc.base_model(**enc, return_dict=True)
+        vec = out.last_hidden_state[:, 0]          # (B,768) CLS
+
+        self.qenc.set_active_adapters(prev)
+        return vec
 
     def pos_index_from_obj(self, obj_ids):                   # list[str]
         mapping = {o: i for i, o in enumerate(self.obj_ids)}

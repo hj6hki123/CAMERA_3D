@@ -39,7 +39,7 @@ with open(in_path, "r", encoding="utf-8") as fin:
         else:
             # 如果已经有这一条 obj_id，只需把 query 加到列表里
             # 理论上 views/corpus_texts 对同一个 obj_id 应该是相同的，
-            # 如果不一样，你可以自行决定要不要去重或者报错
+            # 如果不一样，可以自行决定要不要去重或者报错
             group_data[oid]["queries"].append(q)
 
 # 2. 把分组之后的数据写回到一个新的 JSONL

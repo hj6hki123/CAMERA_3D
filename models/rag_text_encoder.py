@@ -1,13 +1,8 @@
-import json
-import torch
-import torch.nn as nn
+import json, torch, torch.nn as nn
 from transformers import AutoTokenizer, AutoModel
+from models.dense_retriever import DenseRetriever
 from pathlib import Path
 
-# ▼▼▼ 核心修改：引入我們新的外部檢索器 ▼▼▼
-from models.external_retriever import ExternalRetriever
-
-# ▼▼▼ 以下 FusionBlock 和 CrossFusion 維持不變，僅為保持檔案完整性而保留 ▼▼▼
 class FusionBlock(nn.Module):
     def __init__(self, d=768, h=8):
         super().__init__()
@@ -19,13 +14,13 @@ class FusionBlock(nn.Module):
 
     def forward(self, x):
         # ln + self-attn，取回 attn weights
-        attn_out, attn_weights = self.attn(self.ln1(x), self.ln1(x), self.ln1(x), need_weights=True)
+        attn_out, attn_weights = self.attn(self.ln1(x), self.ln1(x), self.ln1(x), need_weights=True,average_attn_weights=False)
         x = x + attn_out
         x = x + self.ff(self.ln2(x))
         return x, attn_weights  # attn_weights shape = (B, heads, T, T)
 
 class CrossFusion(nn.Module):
-    def __init__(self, L=2, d=768, h=8): # 根據您原碼，L 似乎是 2 或 3，此處設為 2
+    def __init__(self, L=3, d=768, h=8):
         super().__init__()
         self.blocks = nn.ModuleList([FusionBlock(d, h) for _ in range(L)])
         self.proj   = nn.Linear(d, 512)
@@ -34,69 +29,74 @@ class CrossFusion(nn.Module):
         all_attn_maps = []  # collect each layer's attn weights
         for blk in self.blocks:
             seq, attn_w = blk(seq)
-            all_attn_maps.append(attn_w)
+            all_attn_maps.append(attn_w)  # shape = (B, heads, T, T)
         cls_vec = self.proj(seq[:, 0])   # use CLS token 作為輸出
         return cls_vec, all_attn_maps
 
-
-# ▼▼▼ 核心修改：改造 RAGTextEncoder ▼▼▼
 class RAGTextEncoder(nn.Module):
-    def __init__(self, top_k=3, device="cuda"):
-        """
-        初始化 RAG 文字編碼器。
-        這個版本使用 ExternalRetriever 從外部知識庫（維基百科）檢索資訊。
-        """
+    def __init__(self, unified_jsonl, top_k=6, device="cuda", cache_dir: str = None):
         super().__init__()
         self.top_k = top_k
-        self.device = torch.device(device)
 
-        # 1. 初始化外部檢索器
-        #    注意：請將 User-Agent 字串換成您自己的應用名稱和聯繫方式
-        # <-- 修改點：不再使用 DenseRetriever
-        self.retriever = ExternalRetriever()
+        # 從 unified_jsonl 抽出 corpus → 存到 temp_corpus.jsonl
+        corpus = []
+        for line in open(unified_jsonl, encoding="utf-8"):
+            item = json.loads(line)
+            oid  = item["obj_id"]
+            for t in item.get("corpus_texts", []):
+                corpus.append({"text": t, "obj_id": oid})
+                
+        if cache_dir:
+            base = Path(cache_dir)
+        else:
+            base = Path(unified_jsonl).parent
+        base.mkdir(parents=True, exist_ok=True)
+        temp_path = base / "temp_corpus.jsonl"
+        
+        if not temp_path.exists():
+            with open(temp_path, "w") as f:
+                for c in corpus:
+                    f.write(json.dumps(c) + "\n")
 
-        # 2. 初始化用於文本編碼的 BERT 模型和 Tokenizer
-        #    這個 BERT 用來將 query 和檢索到的 contexts 轉換成 CrossFusion 能接受的向量序列
-        # <-- 新增：獨立的文本編碼器
-        self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-        self.text_encoder = AutoModel.from_pretrained("bert-base-uncased").to(self.device)
+        # DenseRetriever - 使用傳入的設備參數
+        self.retriever = DenseRetriever(str(temp_path), device=device, batch=24)
+        self.fusion    = CrossFusion()
 
-        # 3. 複用您原有的 CrossFusion 模組
-        self.fusion = CrossFusion().to(self.device)
-
-    def forward(self, q_list: list[str]):
+    def forward(self, q_list, obj_ids=None, return_loss=False):
         """
-        新的前向傳播流程，從即時檢索外部語義開始。
+        回傳：
+          q_vec: text embedding (B,512)
+          ret_loss: retriever 的 NLL loss
+          tok: token sequence for reranker ((B, 1+top_k, 768))
+          fusion_attn_maps: list of length L，每層 shape=(B, heads, T, T)
         """
+        # 1) 用 DenseRetriever 拿 q_vec, top-k context, retriever loss
+        q_vec, _, _, ctx, ret_loss = self.retriever(q_list, obj_ids, self.top_k)
+
         B = len(q_list)
-        
-        # <-- 核心流程重構 -->
-        # 步驟 1: 為批次中的每個查詢句，從外部進行即時檢索
-        all_contexts = [self.retriever.retrieve(q, top_k=self.top_k) for q in q_list]
+        # 2) 把 query + top-k context 串成一個長序列，一起做 cross-fusion
+        flat = [t for i in range(B) for t in ([q_list[i]] + ctx[i])]
+        tok_inputs = self.retriever.tok(
+            flat, return_tensors="pt", padding=True, truncation=True
+        ).to(q_vec.device)
 
-        # 步驟 2: 準備送入 BERT 編碼器的序列
-        flat_texts = []
-        for i in range(B):
-            query = q_list[i]
-            contexts = all_contexts[i]
-            
-            # 為了保持序列長度一致，如果檢索到的 context 不足 top_k，用空字串填充
-            if len(contexts) < self.top_k:
-                contexts.extend([''] * (self.top_k - len(contexts)))
+        #  切到 retr_adapter
+        prev = self.retriever.qenc.active_adapters
+        self.retriever.qenc.set_active_adapters("retr_adapter")
 
-            flat_texts.extend([query] + contexts[:self.top_k])
+        #  只跑 backbone → 不會回傳 MaskedLMOutput
+        out = self.retriever.qenc.base_model(**tok_inputs, return_dict=True)
+        tok_encoded = out.last_hidden_state[:, 0]          # (B*(1+K),768)
 
-        # 步驟 3: 使用 BERT 進行編碼
-        tok_inputs = self.tokenizer(
-            flat_texts, return_tensors="pt", padding=True, truncation=True, max_length=512
-        ).to(self.device)
-        
-        encoded_vecs = self.text_encoder(**tok_inputs).last_hidden_state[:, 0]
-        
-        tok_seq = encoded_vecs.view(B, 1 + self.top_k, -1)
+        #  還原先前 adapter 狀態
+        self.retriever.qenc.set_active_adapters(prev)
 
-        # 步驟 4: 使用 CrossFusion 進行語意融合
-        vec, fusion_attn_maps = self.fusion(tok_seq)
+        tok_encoded = tok_encoded.view(B, 1 + self.top_k, 768)
 
-        # <-- 返回值改變：不再有 ret_loss，因為檢索器不可訓練 -->
-        return vec, torch.tensor(0., device=vec.device), tok_seq, fusion_attn_maps
+        # 3) CrossFusion
+        vec, fusion_attn_maps = self.fusion(tok_encoded)  # vec: (B,512)
+
+        if return_loss:
+            return vec, ret_loss, tok_encoded, fusion_attn_maps
+        else:
+            return vec, torch.tensor(0., device=vec.device), tok_encoded, fusion_attn_maps

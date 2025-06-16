@@ -10,7 +10,7 @@
 
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
+import math
 import argparse
 import torch
 import faiss
@@ -24,6 +24,7 @@ from models.rag_text_encoder import RAGTextEncoder
 from models.gf_mv_encoder import GFMVEncoder
 from models.cross_modal_reranker import CrossModalReranker
 from torch.nn import TripletMarginLoss
+
 # ---------------------------------------------------------------------------
 # 設備檢測和配置
 # ---------------------------------------------------------------------------
@@ -40,16 +41,16 @@ def get_device(device_arg: str = "auto") -> torch.device:
     if device_arg == "auto":
         if torch.cuda.is_available():
             device = torch.device("cuda")
-            print(f"✓ 自動選擇 CUDA 設備: {torch.cuda.get_device_name()}")
+            print(f" 自動選擇 CUDA 設備: {torch.cuda.get_device_name()}")
         elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
             device = torch.device("mps")
-            print("✓ 自動選擇 Apple Silicon MPS 設備")
+            print(" 自動選擇 Apple Silicon MPS 設備")
         else:
             device = torch.device("cpu")
-            print("✓ 自動選擇 CPU 設備")
+            print(" 自動選擇 CPU 設備")
     else:
         device = torch.device(device_arg)
-        print(f"✓ 使用指定設備: {device}")
+        print(f" 使用指定設備: {device}")
     
     return device
 
@@ -99,131 +100,126 @@ def info_nce(v, t, tau: float = 0.07):
     t = F.normalize(t, 2, 1)
     return F.cross_entropy(v @ t.T / tau, torch.arange(v.size(0), device=v.device))
 
-# ---------------------------------------------------------------------------
-# 階段 1 – 對比預訓練
-# ---------------------------------------------------------------------------
+def mil_nce(v_vec, ctx_seq, tau=0.07):
+    """
+    v_vec : (B, 512)          Gate-Fusion 影像全域向量
+    ctx_seq: (B, K, 512)      Cross-Fusion 投影後的 K 段 context CLS
+    """
+    B, K, D = ctx_seq.shape
+    ctx_flat = ctx_seq.reshape(B * K, D)                    # (B*K,512)
 
-# ---------------------------------------------------------------------------
-# 四段式對比預訓練
-# ---------------------------------------------------------------------------
-def stage1_four_phases(args, ds, device,
-                       warm_epochs=3,
-                       align_epochs=4,
-                       hardneg_epochs=6,
-                       finetune_epochs=2):
+    sim = (F.normalize(v_vec,  2, 1) @                      # (B,512)
+           F.normalize(ctx_flat, 2, 1).t()) / tau           # (B, B*K)
 
-    total_epochs = warm_epochs + align_epochs + hardneg_epochs + finetune_epochs
+    # 取自己袋內 K 個 positive 的 index
+    base   = (torch.arange(B, device=v_vec.device) * K).unsqueeze(1)  # (B,1)
+    pos_id = base + torch.arange(K, device=v_vec.device)              # (B,K)
+    pos_sim= sim.gather(1, pos_id)                                    # (B,K)
+
+    num   = torch.logsumexp(pos_sim, dim=1)           # (B,)
+    denom = torch.logsumexp(sim,     dim=1)           # (B,)
+    return (denom - num).mean()
+
+def stage1(args, ds, device):
     dl = DataLoader(ds, args.bs, shuffle=True, drop_last=True, num_workers=4)
 
+    # ── 1. 建模 ────────────────────────────────────────────────────────────
     txt_enc = RAGTextEncoder(args.data_jsonl,
                              args.topk,
                              device=device,
                              cache_dir=args.out).to(device)
     vis_enc = GFMVEncoder(args.views).to(device)
 
-    # ---------- 工具函式 ---------------------------------------------------
-    def set_requires(vision_grad, fusion_grad, bert_grad):
-        for p in vis_enc.parameters():
-            p.requires_grad = vision_grad
-        for p in txt_enc.fusion.parameters():
-            p.requires_grad = fusion_grad
-        for name, p in txt_enc.retriever.qenc.named_parameters():
-            # 冷凍 BERT 前四層，到最後階段才全開
-            layer_id = int(name.split('.')[2]) if name.startswith('encoder') else -1
-            if layer_id < 4 and not finetune_mode:
-                p.requires_grad = False
-            else:
-                p.requires_grad = bert_grad
+    # ── 2. 參數凍結策略 ───────────────────────────────────────────────────
+    # memory side (kenc) 永遠凍結
+    for p in txt_enc.retriever.kenc.parameters():
+        p.requires_grad = False
 
-    def build_opt(lr_vis, lr_txt):
-        params, lrs = [], []
-        if lr_vis > 0:
-            params += list(vis_enc.parameters()); lrs += [lr_vis]
-        if lr_txt > 0:
-            txt_p = list(txt_enc.fusion.parameters()) + \
-                    list(txt_enc.retriever.qenc.parameters())
-            params += txt_p; lrs += [lr_txt]
-        groups = [{'params': p, 'lr': lr} for p, lr in zip(params, lrs)]
-        return torch.optim.AdamW(groups, weight_decay=1e-2)
+    # qenc → 只開啟 adapter 層
+    for n, p in txt_enc.retriever.qenc.named_parameters():
+        p.requires_grad = "adapters" in n          # 其餘權重凍結
 
-    # ---------- 初期設定（Warm-up）-----------------------------------------
-    finetune_mode = False
-    set_requires(vision_grad=True, fusion_grad=False, bert_grad=False)
-    opt = build_opt(lr_vis=args.lr1, lr_txt=0.)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=warm_epochs*len(dl))
+    # Cross-Fusion 與 Gate-Fusion 全開
+    pg_qenc  = [p for p in txt_enc.retriever.qenc.parameters() if p.requires_grad]
+    pg_xfus  = list(txt_enc.fusion.parameters())          # Cross-Fusion
+    pg_gate  = list(vis_enc.parameters())                 # Gate-Fusion-MV
 
-    # ---------- 主訓練迴圈 -------------------------------------------------
-    ema_alpha = 0.1  # memory_vec EMA 更新係數
-    step_global = 0
-    for ep in range(total_epochs):
+    # ── 3. optimizer / scheduler ──────────────────────────────────────────
+    opt = torch.optim.AdamW(
+        [{"params": pg_qenc, "lr": args.lr1 * 0.2},   # adapter 用小一點 LR
+         {"params": pg_xfus, "lr": args.lr1},
+         {"params": pg_gate, "lr": args.lr1}],
+        weight_decay=1e-2
+    )
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=args.ep1 * len(dl)
+    )
 
-        # —— 階段切換：Align、Hard-neg、Fine-turn ————————————————
-        if ep == warm_epochs:              # 進入雙向對齊
-            set_requires(vision_grad=False, fusion_grad=True, bert_grad=True)
-            opt = build_opt(lr_vis=0., lr_txt=args.lr1 * 0.5)
-            scheduler = torch.optim.lr_scheduler.LinearLR(opt,
-                                                           start_factor=1.0,
-                                                           end_factor=0.2,
-                                                           total_iters=align_epochs*len(dl))
-        if ep == warm_epochs + align_epochs:   # 進入硬負課程
-            set_requires(vision_grad=False, fusion_grad=True, bert_grad=True)
-            opt = build_opt(lr_vis=0., lr_txt=args.lr1 * 0.3)
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt,
-                                                                    T_max=hardneg_epochs*len(dl))
-        if ep == warm_epochs + align_epochs + hardneg_epochs:  # 進入微量微調
-            finetune_mode = True
-            set_requires(vision_grad=False, fusion_grad=True, bert_grad=True)
-            opt = build_opt(lr_vis=0., lr_txt=args.lr1 * 0.1)
-            scheduler = torch.optim.lr_scheduler.LinearLR(opt,
-                                                           start_factor=1.0,
-                                                           end_factor=0.5,
-                                                           total_iters=finetune_epochs*len(dl))
-            print("◎ 進入 Fine-turn：BERT 全層解凍，學習率再降一階。")
+    # ── 3-a)  印出本次真正可訓練參數量 ────────────────────────────────────
+    def count(p_list): return sum(p.numel() for p in p_list)
+    trainable = [p for p in txt_enc.parameters() if p.requires_grad] + \
+                [p for p in vis_enc.parameters() if p.requires_grad]
+    print(f"  Trainable parameters this run: {count(trainable):,}")
+    print(f"   • q-enc  adapter : {count(pg_qenc):,}")
+    print(f"   • Cross-Fusion   : {count(pg_xfus):,}")
+    print(f"   • Gate-Fusion-MV : {count(pg_gate):,}")
 
-        pbar = tqdm(dl, desc=f"E{ep:02d}", unit="batch")
+    # ── 4. loss 權重 ─────────────────────────────────────────────────────
+    λ_nll, λ_ctx, λ_view = 0.02, 0.05, 0.10
+
+    # ── 5. 進入訓練迴圈 ──────────────────────────────────────────────────
+    for ep in range(args.ep1):
+        pbar = tqdm(dl, desc=f"Stage-1  Epoch {ep}", unit="batch")
+
         for caps, imgs, obj_ids, _ in pbar:
             imgs = imgs.to(device, non_blocking=True)
 
-            # —— 文字編碼器 ------------------------------------------------
-            t_vec, ret_loss, _, _ = txt_enc(
+            # 5-a) Text branch
+            t_vec, ret_loss, tok_seq, _ = txt_enc(
                 q_list=list(caps),
                 obj_ids=list(obj_ids),
                 return_loss=True
             )
 
-            # —— 視覺編碼器 ------------------------------------------------
-            v_vec, _, _ = vis_enc(imgs, t_vec)
+            # 5-b) Vision branch
+            v_vec, attn_maps, _ = vis_enc(imgs, t_vec)
 
-            # —— 損失組合 --------------------------------------------------
-            loss_nce = info_nce(v_vec, t_vec, args.tau)
+            # 5-c) losses ------------------------------------------------
+            loss_nce = info_nce(v_vec, t_vec, args.tau)            # global
+            ctx_seq  = txt_enc.fusion.proj(tok_seq[:, 1:])         # (B,K,512)
+            loss_mil = mil_nce(v_vec, ctx_seq, args.tau)           # MIL-NCE
 
-            if ep >= warm_epochs + align_epochs:     # 硬負課程與 fine-turn
-                # 取 batch 內自己下一個樣本當負例（簡易示範，可自行換 FAISS top-1）
-                v_neg = torch.roll(v_vec, shifts=-1, dims=0)
-                t_neg = torch.roll(t_vec, shifts= 1, dims=0)
-                trip = torch.nn.functional.triplet_margin_loss
-                loss_tri = trip(t_vec, v_vec, v_neg, margin=0.2) + \
-                           trip(v_vec, t_vec, t_neg, margin=0.2)
-            else:
-                loss_tri = 0.
+            # gate-to-view entropy  (head-avg → (B,T,T))
+            last = attn_maps['fuse'][-1].mean(1)                   # (B,T,T)
+            gate2v = last[:, 1, 2:2+args.views]                    # (B,V)
+            view_ent = -(gate2v * torch.log(gate2v + 1e-6)).sum(1)
+            view_ent = view_ent.mean() / math.log(args.views)
 
-            loss = loss_nce + args.lmb * ret_loss + 0.5 * loss_tri
-            opt.zero_grad(); loss.backward(); torch.nn.utils.clip_grad_norm_(opt.param_groups[0]['params'], 1.0); opt.step()
-            scheduler.step()
+            loss = (loss_nce +
+                    λ_ctx  * loss_mil +
+                    λ_view * view_ent +
+                    λ_nll  * ret_loss)
 
-            # —— EMA 更新 retriever memory_vec ----------------------------
-            with torch.no_grad():
-                mem = txt_enc.retriever.memory_vec
-                mem.mul_(1 - ema_alpha).add_(ema_alpha, F.normalize(mem, 2, -1))
+            # 5-d) backward ---------------------------------------------
+            opt.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+            opt.step(); sched.step()
 
-            pbar.set_postfix(NCE=f"{loss_nce:.3f}", Ret=f"{ret_loss:.3f}", Tri=f"{loss_tri:.3f}")
-            wb_log({"loss_total": loss.item(),
-                    "loss_nce": loss_nce,
-                    "loss_tri": loss_tri,
-                    "loss_ret": ret_loss}, step=step_global)
-            step_global += 1
+            pbar.set_postfix(NCE =f"{loss_nce:.3f}",
+                             MIL =f"{loss_mil:.3f}",
+                             NLL =f"{ret_loss:.3f}",
+                             Ent =f"{view_ent:.3f}",
+                             Σ   =f"{loss:.3f}")
 
-        # —— 每個 epoch 後存檔 --------------------------------------------
+            wb_log({"loss/NCE":       loss_nce.item(),
+                    "loss/MIL":       loss_mil.item(),
+                    "loss/NLL":       ret_loss.item(),
+                    "loss/view_ent":  view_ent.item(),
+                    "loss/total":     loss.item()},
+                   step=ep * len(dl))
+
+        # 5-e) checkpoint ----------------------------------------------
         os.makedirs(args.out, exist_ok=True)
         torch.save({"txt": txt_enc.state_dict(),
                     "vis": vis_enc.state_dict()},
@@ -231,56 +227,6 @@ def stage1_four_phases(args, ds, device,
 
     txt_enc.eval(); vis_enc.eval()
     return txt_enc, vis_enc
-
-
-def stage1(args, ds, device):
-    print("階段1開始…")
-    dl = DataLoader(ds, args.bs, shuffle=True, drop_last=True, num_workers=4)
-    txt_enc = RAGTextEncoder(args.data_jsonl, args.topk, device=device, cache_dir=args.out).to(device)
-    # 凍結 BERT（只訓練 GateFusion-MV） 
-    for p in txt_enc.retriever.qenc.parameters():
-        p.requires_grad = False
-    vis_enc = GFMVEncoder(args.views).to(device)
-    
-    opt = torch.optim.AdamW(
-        list(txt_enc.parameters()) + list(vis_enc.parameters()), lr=args.lr1
-    )
-
-    for ep in range(args.ep1):
-        pbar = tqdm(dl, desc=f"階段1 Epoch {ep}", unit="batch")
-        for step, (cap, imgs, obj_id, idx) in enumerate(pbar):
-            imgs = imgs.to(device, non_blocking=True)
-            # 1) Text fusion → 拿到四項：vec, retriever loss, tok, fusion_attn_maps
-            t_vec, ret_loss, txt_tok, fusion_attn_maps = txt_enc(
-                q_list=list(cap),
-                obj_ids=list(obj_id),
-                return_loss=True
-            )
-            # 2) Visual (GateFusion) → global vec, vis_attn_maps, tok_vis
-            v_vec, vis_attn_maps, vis_tok = vis_enc(imgs, t_vec)
-
-            # 計算 loss：InfoNCE + retriever loss
-            loss = info_nce(v_vec, t_vec, args.tau) + args.lmb * ret_loss
-
-            opt.zero_grad()
-            loss.backward()
-            
-            info = info_nce(v_vec, t_vec, args.tau).item()
-            ret  = ret_loss.item()
-            print(f"InfoNCE={info:.4f}, RetrieverNLL={ret:.4f}, λ·ret={args.lmb*ret:.4f}")
-            wb_log({"stage1/InfoNCE": info, "stage1/RetrieverNLL": ret}, step=...)
-            
-            opt.step()
-
-            pbar.set_postfix(loss=f"{loss.item():.4f}")
-            wb_log({"stage1/loss": loss.item()}, step=ep * len(dl) + step)
-
-        # 每個 epoch 結束 存一次 encoder weights
-        os.makedirs(args.out, exist_ok=True)
-        torch.save({"txt": txt_enc.state_dict(), "vis": vis_enc.state_dict()},
-                   f"{args.out}/enc1.pth")
-
-    return txt_enc.eval(), vis_enc.eval()
 
 @torch.no_grad()
 def build_faiss_with_tok(ds, txt_enc, vis_enc, args, device):
@@ -293,12 +239,12 @@ def build_faiss_with_tok(ds, txt_enc, vis_enc, args, device):
     tok_path = os.path.join(args.out, "vis_tok.npy")
 
     if os.path.isfile(idx_path) and os.path.isfile(tok_path):
-        print(f"✓ 從 {args.out} 載入快取的 FAISS 索引與 token")
+        print(f" 從 {args.out} 載入快取的 FAISS 索引與 token")
         index   = faiss.read_index(idx_path, faiss.IO_FLAG_MMAP)
         all_tok = np.load(tok_path)
         return index, all_tok
 
-    print("✗ 找不到快取 → 正在建立 FAISS 索引與 token ...")
+    print(" 找不到快取 → 正在建立 FAISS 索引與 token ...")
     g_vecs, g_toks = [], []
     loader = DataLoader(ds, args.bs, num_workers=4, shuffle=False)
 
@@ -323,7 +269,7 @@ def build_faiss_with_tok(ds, txt_enc, vis_enc, args, device):
     index = faiss.IndexFlatIP(512)
     index.add(all_vec)
     faiss.write_index(index, idx_path)
-    print(f"✓ 已保存 faiss_index.bin & vis_tok.npy 至 {args.out}")
+    print(f" 已保存 faiss_index.bin & vis_tok.npy 至 {args.out}")
     return index, all_tok
 # ---------------------------------------------------------------------------
 # 階段 1 – 交錯凍結 / 解凍 訓練
@@ -510,11 +456,11 @@ if __name__ == "__main__":
     from torch.utils.data import Subset
 
     full_ds = UnifiedDataset(args.data_jsonl, num_views=args.views)
-
+    # ds = full_ds
     print(len(full_ds))
     # 只取前 1000 筆
     ds = Subset(full_ds, list(range(1000)))
-    
+
     print(len(ds))
     
     if args.resume_enc1:  # 載入階段1模型

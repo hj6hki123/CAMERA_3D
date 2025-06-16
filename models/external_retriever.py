@@ -1,4 +1,4 @@
-# external_retriever.py (修正後完整可執行版)
+# external_retriever.py
 import wikipedia
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -6,10 +6,8 @@ from nltk.tokenize import sent_tokenize
 import nltk
 import warnings
 
-# 忽略來自 wikipedia 套件的特定 BeautifulSoup 警告
 warnings.filterwarnings("ignore", category=UserWarning, module='wikipedia')
 
-# 確保 NLTK 的句子分割模型已下載
 try:
     nltk.data.find('tokenizers/punkt')
 except nltk.downloader.DownloadError:
@@ -19,7 +17,6 @@ except nltk.downloader.DownloadError:
 class ExternalRetriever:
     """
     一個從維基百科檢索、解析並重排序(Re-rank)外部語義的工具。
-    (修正版：使用 'wikipedia' 套件進行搜尋)
     """
     def __init__(self, lang: str = 'en', model_name: str = 'all-MiniLM-L6-v2'):
         """
