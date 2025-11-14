@@ -1,6 +1,6 @@
 # CAMERA_3D
 
-CAMERA_3D 是一個針對多視角 3D 物件檢索的實驗性專案。專案將文字描述與多張渲染圖像進行對齊，並透過兩階段流程訓練：首先預訓練跨模態編碼器，再使用 reranker 微調。
+CAMERA_3D 是一個針對多視角 3D 物件檢索的實驗性專案。專案將文字描述與多張渲染圖像進行對齊
 
 ## 主要內容
 
@@ -17,29 +17,6 @@ CAMERA_3D 是一個針對多視角 3D 物件檢索的實驗性專案。專案將
 - transformers
 - 其他依賴：numpy、tqdm、psutil、matplotlib
 
-## 訓練範例
-
-```bash
-python train_two_stage.py \
-    --data_jsonl datasets/unified_data.jsonl \
-    --out ckpts \
-    --views 12 \
-    --bs 8 \
-    --topk 4
-```
-
-上述指令會輸出 `enc1.pth`、`rerank.pth` 等權重檔案到指定資料夾。
-
-## 評估範例
-
-```bash
-python evaluator_v2.py \
-    --data datasets/unified_data.jsonl \
-    --ckpt ckpts \
-    --bs 32 \
-    --views 12 \
-    --topk 4
-```
 
 執行後將列印 Recall@K、mAP@10、NDCG@10 以及平均資源使用量等統計。
 
